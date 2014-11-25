@@ -26,16 +26,13 @@ float chi2_distance(const float* x_hist, const float* y_hist, const float nsx, c
 
 	int k = 0;
 
-	const float k0 = std::sqrt(nsy / nsx);
-	const float k1 = std::sqrt(nsx / nsy);
-
 	for (int i = 0; i < numbins; i++)
 	{
 		if (x_hist[i] + y_hist[i] > 0)
 		{
-			float t = k0 * x_hist[i] - k1 * y_hist[i];
+			float t = nsy * x_hist[i] - nsx * y_hist[i];
 
-			dist += (t * t) / (x_hist[i] + y_hist[i]);
+			dist += (t * t) / ((nsx * nsy) * (x_hist[i] + y_hist[i]));
 			k++;
 		}
 	}
@@ -43,21 +40,22 @@ float chi2_distance(const float* x_hist, const float* y_hist, const float nsx, c
 	return dist * (1.f / k);
 }
 
-float chi2_patch_distance(const float* channel_histograms[], int nchan, 
+template<int nchans = 3> float chi2_patch_distance(const float* channel_histograms[],
 	int width, int heigth, 
 	int numbins, int patch_size, 
 	int ax, int ay, int bx, int by)
 {
 	float dist = 0;
 
-	for (int i = 0; i < nchan; i++)
+	
+	for (int y = -patch_size; y <= patch_size; y++)
 	{
-		for (int y = -patch_size; y <= patch_size; y++)
+		for (int x = -patch_size; x <= patch_size; x++)
 		{
-			for (int x = -patch_size; x <= patch_size; x++)
+			for (int i = 0; i < nchans; i++)
 			{
-				dist += chi2_distance(channel_histograms[i + 1] + ((ay + y) * width + ax + x) * numbins, 
-					channel_histograms[i + 1] + ((by + y) * width + bx + x) * numbins, 
+				dist += chi2_distance(channel_histograms[1 + i] + ((ay + y) * width + ax + x) * numbins,
+					channel_histograms[1 + i] + ((by + y) * width + bx + x) * numbins,
 					channel_histograms[0][(ay + y) * width + ax + x],
 					channel_histograms[0][(by + y) * width + by + y],
 					numbins);
@@ -116,23 +114,15 @@ void rhf_filter_singlescale(int width, int height, int bins, int knn,
 						if (sx == px && sy == py)
 							continue;
 
-						const float dist = chi2_patch_distance(channel_histograms, 3, width, height, bins, window_boundary, px, py, sx, sy);
+						const float dist = chi2_patch_distance(channel_histograms, width, height, bins, window_boundary, px, py, sx, sy);
 
 						nearest_neighours.push_back(std::make_tuple(dist, sx, sy));
-
-						for (int i = 0; i < knn; i++)
-						{
-							if (dist < std::get<0>(nearest_neighours[i]))
-							{
-								nearest_neighours[i] = std::make_tuple(dist, sx, sy);
-							}
-						}
 					}
 				}
 
 				std::sort(nearest_neighours.begin(), nearest_neighours.end(), [](std::tuple<float, int, int>& lhs, std::tuple<float, int, int>& rhs)
 				{
-					return std::get<0>(lhs) < std::get<1>(rhs);
+					return std::get<0>(lhs) < std::get<0>(rhs);
 				});
 
 				for (int i = 0; i < knn; i++)
@@ -368,7 +358,7 @@ void bicubic_interpolation(const float* input_image, float* out_image, int nchan
 
 		coeffs[0] = a * t2 * (1.f - t);
 		coeffs[1] = (2 * a + 3 - (a + 2) * t) * t2 - at;
-		coeffs[2] = ((a + 2) * t + a - 3) * t2 + 1;
+		coeffs[2] = ((a + 2) * t - a - 3) * t2 + 1;
 		coeffs[3] = a * (t - 2) * t2 + at;
 	};
 
@@ -416,7 +406,7 @@ void bicubic_interpolation(const float* input_image, float* out_image, int nchan
 							sum += c[2 - i] * input_image[(py * src_width + center_x + i) * nchan + chan];
 						}
 
-						convolved[(py * dest_width + center_x) * nchan + chan] = sum;
+						convolved[(py * dest_width + px) * nchan + chan] = sum;
 					}
 				}
 			}
@@ -434,7 +424,7 @@ void bicubic_interpolation(const float* input_image, float* out_image, int nchan
 							sum += c[2 - i] * input_image[idx * nchan + chan];
 						}
 
-						convolved[(py * dest_width + center_x) * nchan + chan] = sum;
+						convolved[(py * dest_width + px) * nchan + chan] = sum;
 					}
 				}
 			}
@@ -461,7 +451,7 @@ void bicubic_interpolation(const float* input_image, float* out_image, int nchan
 
 			if (center_y - 1 >= 0 && center_y + 2 < src_height)
 			{
-				for (int px = 0; px < src_width; px++)
+				for (int px = 0; px < dest_width; px++)
 				{
 					for (int chan = 0; chan < nchan; chan++)
 					{
@@ -471,13 +461,13 @@ void bicubic_interpolation(const float* input_image, float* out_image, int nchan
 							sum += c[2 - i] * convolved[((center_y + i) * dest_width + px) * nchan + chan];
 						}
 
-						out_image[(center_y * dest_width + px) * nchan + chan] = sum;
+						out_image[(py * dest_width + px) * nchan + chan] = sum;
 					}
 				}
 			}
 			else
 			{
-				for (int px = 0; px < src_width; px++)
+				for (int px = 0; px < dest_width; px++)
 				{
 					for (int chan = 0; chan < nchan; chan++)
 					{
@@ -489,7 +479,7 @@ void bicubic_interpolation(const float* input_image, float* out_image, int nchan
 							sum += c[2 - i] * convolved[idx * nchan + chan];
 						}
 
-						out_image[(center_y * dest_width + px) * nchan + chan] = sum;
+						out_image[(py * dest_width + px) * nchan + chan] = sum;
 					}
 				}
 			}
@@ -501,9 +491,7 @@ void rhf_filter(int width, int height, int bins, const float* input_image, const
 {
 	const int num_pixels = width * height;
 
-	memset(out_image, 0, num_pixels * 4 * sizeof(float));
-
-	/*rhf_filter_singlescale(width, height, bins, params.knn, input_image, channel_histograms, out_image, params);
+	/*rhf_filter_singlescale(width, height, bins, 0, input_image, channel_histograms, out_image, params);
 	return;*/
 
 	double total = 0;
@@ -513,23 +501,36 @@ void rhf_filter(int width, int height, int bins, const float* input_image, const
 		total += channel_histograms[0][i];
 	}
 
-	float* first_scaled_image = new float[width * height * 4];
-	float* second_scaled_image = new float[width * height * 4];
+	std::vector<float> scaled_input_image_buf(width * height * 4, 0);
+	std::vector<float> scaled_out_buf(width * height * 4, 0);
+	std::vector<float> scaled_old_out_buf(width * height * 4, 0);
+	std::vector<float> temp_buf(width * height * 4, 0);
+	std::vector<float> temp_buf2(width * height * 4, 0);
 
-	float* old_image = first_scaled_image;
-	float* next_scaled_image = second_scaled_image;
-
-	std::vector<float> scaled_hist_nsamples(width * height, 0);
-	std::vector<float> scaled_hist_red(width * height * bins, 0);
-	std::vector<float> scaled_hist_green(width * height * bins, 0);
-	std::vector<float> scaled_hist_blue(width * height * bins, 0);
+	std::vector<float> scaled_hist_nsamples_buf(width * height, 0);
+	std::vector<float> scaled_hist_red_buf(width * height * bins, 0);
+	std::vector<float> scaled_hist_green_buf(width * height * bins, 0);
+	std::vector<float> scaled_hist_blue_buf(width * height * bins, 0);
 
 	static const float sigma_scale = 0.55f;
+
+	int prev_width = width;
+	int prev_height = height;
 
 	for (int s = params.nscales - 1; s >= 0; s--)
 	{					
 		int sw = width;
-		int sh = height;		
+		int sh = height;
+
+		const float* scaled_input_image = input_image;
+
+		const float* scaled_hists[4] =
+		{
+			channel_histograms[0],
+			channel_histograms[1],
+			channel_histograms[2],
+			channel_histograms[3],
+		};
 
 		if (s > 0)
 		{
@@ -538,17 +539,17 @@ void rhf_filter(int width, int height, int bins, const float* input_image, const
 			sw = std::floor(sw * scale);
 			sh = std::floor(sh * scale);
 
-			gaussian_downscale(input_image, next_scaled_image, 4, width, height, sw, sh, scale, sigma_scale);
-			gaussian_downscale(channel_histograms[0], scaled_hist_nsamples.data(), 1, width, height, sw, sh, scale, sigma_scale);
-			gaussian_downscale(channel_histograms[1], scaled_hist_red.data(), bins, width, height, sw, sh, scale, sigma_scale);
-			gaussian_downscale(channel_histograms[2], scaled_hist_green.data(), bins, width, height, sw, sh, scale, sigma_scale);
-			gaussian_downscale(channel_histograms[3], scaled_hist_blue.data(), bins, width, height, sw, sh, scale, sigma_scale);
+			gaussian_downscale(input_image, scaled_input_image_buf.data(), 4, width, height, sw, sh, scale, sigma_scale);
+			gaussian_downscale(channel_histograms[0], scaled_hist_nsamples_buf.data(), 1, width, height, sw, sh, scale, sigma_scale);
+			gaussian_downscale(channel_histograms[1], scaled_hist_red_buf.data(), bins, width, height, sw, sh, scale, sigma_scale);
+			gaussian_downscale(channel_histograms[2], scaled_hist_green_buf.data(), bins, width, height, sw, sh, scale, sigma_scale);
+			gaussian_downscale(channel_histograms[3], scaled_hist_blue_buf.data(), bins, width, height, sw, sh, scale, sigma_scale);
 
 			double total_scaled = 0;
 
 			for (int i = 0; i < sw * sh; i++)
 			{
-				total_scaled += scaled_hist_nsamples[i];
+				total_scaled += scaled_hist_nsamples_buf[i];
 			}
 
 			const float norm = total / total_scaled;
@@ -557,41 +558,58 @@ void rhf_filter(int width, int height, int bins, const float* input_image, const
 			{
 				for (int j = 0; j < bins; j++)
 				{
-					scaled_hist_red[i * bins + j] *= norm;
-					scaled_hist_green[i * bins + j] *= norm;
-					scaled_hist_blue[i * bins + j] *= norm;
+					scaled_hist_red_buf[i * bins + j] *= norm;
+					scaled_hist_green_buf[i * bins + j] *= norm;
+					scaled_hist_blue_buf[i * bins + j] *= norm;
 				}
 			}
+
+			scaled_input_image = scaled_input_image_buf.data();
+			scaled_hists[0] = scaled_hist_nsamples_buf.data();
+			scaled_hists[1] = scaled_hist_red_buf.data();
+			scaled_hists[2] = scaled_hist_green_buf.data();
+			scaled_hists[3] = scaled_hist_blue_buf.data();
 		}
-		else
-		{
 
-		}
+		int knn_scaled = s > 0 ? -1 : params.knn;
 
-		OIIO::ImageBuf out_buf(OIIO::ImageSpec(sw, sh, 4, OIIO::TypeDesc::FLOAT));
-
-		int knn_scaled = s > 0 ? 0 : params.knn;
-
-		const float* scaled_hists[] = 
-		{
-			scaled_hist_nsamples.data(),
-			scaled_hist_red.data(),
-			scaled_hist_green.data(),
-			scaled_hist_blue.data()
-		};
-
-		rhf_filter_singlescale(sw, sh, bins, knn_scaled, next_scaled_image, scaled_hists, (float*)out_buf.localpixels(), params);
+		rhf_filter_singlescale(sw, sh, bins, knn_scaled, scaled_input_image, scaled_hists, scaled_out_buf.data(), params);
 
 		if (s < params.nscales - 1)
-		{
+		{	
+			int ssw = std::floor(sw * 0.5);
+			int ssh = std::floor(sh * 0.5);
 
+			gaussian_downscale(scaled_out_buf.data(), temp_buf.data(), 4, sw, sh, ssw, ssh, 0.5f, sigma_scale);
+			bicubic_interpolation(temp_buf.data(), temp_buf2.data(), 4, ssw, ssh, sw, sh);
+
+			for (int i = 0; i < sw * sh; i++)
+			{
+				scaled_out_buf[i * 4 + 0] -= temp_buf2[i * 4 + 0];
+				scaled_out_buf[i * 4 + 1] -= temp_buf2[i * 4 + 1];
+				scaled_out_buf[i * 4 + 2] -= temp_buf2[i * 4 + 2];
+				scaled_out_buf[i * 4 + 3] -= temp_buf2[i * 4 + 3];
+			}
+
+			bicubic_interpolation(scaled_old_out_buf.data(), temp_buf.data(), 4, prev_width, prev_height, sw, sh);
+
+			for (int i = 0; i < sw * sh; i++)
+			{
+				scaled_out_buf[i * 4 + 0] += temp_buf[i * 4 + 0];
+				scaled_out_buf[i * 4 + 1] += temp_buf[i * 4 + 1];
+				scaled_out_buf[i * 4 + 2] += temp_buf[i * 4 + 2];
+				scaled_out_buf[i * 4 + 3] += temp_buf[i * 4 + 3];
+			}
 		}
 
 		if (s == 0)
 		{
-			memcpy(out_image, out_buf.localpixels(), width * height * 4 * sizeof(float));
+			memcpy(out_image, scaled_out_buf.data(), width * height * 4 * sizeof(float));
 		}
 
-		std::swap(old_image, next_scaled_image);
+		prev_width = sw;
+		prev_height = sh;
+
+		std::swap(scaled_out_buf, scaled_old_out_buf);
 	}		
 }
