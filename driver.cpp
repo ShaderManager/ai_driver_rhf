@@ -30,16 +30,29 @@ struct RHFDriver
 
 node_parameters
 {
+	AiParameterSTR("filename", "output.tif");
+	AiMetaDataSetBool(mds, "filename", "maya.hide", true);
 
+	AiMetaDataSetStr(mds, NULL, "maya.attr_prefix", "");
+	AiMetaDataSetBool(mds, NULL, "display_driver", true);
+
+	// Pixel filter settings
+	AiParameterSTR("filter", "gaussian");
+	AiParameterFlt("filter_width", 2);
+
+	// RHF params
+	AiParameterFLT("threshold", 1.0f);
+	AiParameterINT("patch_size", 1);
+	AiParameterINT("search_window_size", 6);
+	AiParameterINT("scales", 2);
+	AiParameterINT("knn", 2);
 }
 
 node_initialize
 {
 	RHFDriver* self = (RHFDriver*)AiMalloc(sizeof(RHFDriver));
 
-	//AiDriverInitialize(node, false, self);
-
-	self->filter = OIIO::Filter2D::create("gaussian", 2, 2);
+	//AiDriverInitialize(node, false, self);	
 
 	static const char* required_aovs[] = { "RGBA RGBA", NULL };
 
@@ -78,7 +91,10 @@ driver_open
 	RHFDriver* self = static_cast<RHFDriver*>(AiDriverGetLocalData(node));
 
 	self->width = display_window.maxx - display_window.minx + 1;
-	self->height = display_window.maxy - display_window.miny + 1;
+	self->height = display_window.maxy - display_window.miny + 1;	
+
+	const float filter_width = AiNodeGetFlt(node, "filter_width");
+	self->filter = OIIO::Filter2D::create(AiNodeGetStr(node, "filter"), filter_width, filter_width);
 
 	const int num_pixels = self->width * self->height;
 	const int num_channels = 4;
@@ -184,32 +200,49 @@ driver_close
 {
 	RHFDriver* self = static_cast<RHFDriver*>(AiDriverGetLocalData(node));
 
-	std::string output_name = "d:/Work/RnD/ai_rhf_driver/image_unfiltered.tif";
+	const char* output_name = AiNodeGetStr(node, "filename");
 
 	auto image_out = OIIO::ImageOutput::create(output_name);
 
-	image_out->open(output_name, OIIO::ImageSpec(self->width, self->height, 4, OIIO::TypeDesc::FLOAT));
-	if (!image_out->write_image(OIIO::TypeDesc::FLOAT, self->pixels))
+	if (image_out)
 	{
-		AiMsgError("Could not write image: %s", image_out->geterror().c_str());
+		if (image_out->open(output_name, OIIO::ImageSpec(self->width, self->height, 4, OIIO::TypeDesc::FLOAT)))
+		{
+			const float* hists[] = { self->nsamples, self->hist_red, self->hist_green, self->hist_blue };
+
+			float* filtered_image = new float[self->width * self->height * 4];
+
+			RHFParameters params;
+
+			params.patch_size = AiNodeGetInt(node, "patch_size");
+			params.search_size = AiNodeGetInt(node, "search_window_size");
+			params.nscales = AiNodeGetInt(node, "scales");
+			params.knn = AiNodeGetInt(node, "knn");
+			params.threshold = AiNodeGetFlt(node, "threshold");
+
+			AiMsgInfo("Starting filtering image with RHF");
+
+			rhf_filter(self->width, self->height, RHFDriver::num_bins, self->pixels, hists, filtered_image, params);
+
+			AiMsgInfo("Filtered! Writing image");
+
+			if (!image_out->write_image(OIIO::TypeDesc::FLOAT, filtered_image))
+			{
+				AiMsgError("Could not write image: %s", image_out->geterror().c_str());
+			}
+			image_out->close();
+
+			delete[] filtered_image;
+		}
+		else
+		{
+			AiMsgError("Could not open '%s' on write. Reason: %s", output_name, image_out->geterror().c_str());
+		}
 	}
-	image_out->close();
-
-	const float* hists[] = {self->nsamples, self->hist_red, self->hist_green, self->hist_blue};
-
-	float* filtered_image = new float[self->width * self->height * 4];
-
-	rhf_filter(self->width, self->height, RHFDriver::num_bins, self->pixels, hists, filtered_image);
-
-	output_name = "d:/Work/RnD/ai_rhf_driver/image_filtered.tif";
-	image_out->open(output_name, OIIO::ImageSpec(self->width, self->height, 4, OIIO::TypeDesc::FLOAT));
-	if (!image_out->write_image(OIIO::TypeDesc::FLOAT, filtered_image))
+	else
 	{
-		AiMsgError("Could not write image: %s", image_out->geterror().c_str());
+		AiMsgError("Could not initialize image writer. Reason: %s", OIIO::geterror().c_str());
 	}
-	image_out->close();
-
-	delete[] filtered_image;
 
 	delete image_out;
 }
@@ -224,7 +257,7 @@ node_loader
 	{
 	case 0:
 		{
-			MessageBox(0, L"!", L"!", MB_OK);
+			//MessageBox(0, L"!", L"!", MB_OK);
 
 			node->methods = rhf_driver_mtds;
 			node->output_type = AI_TYPE_RGBA;
