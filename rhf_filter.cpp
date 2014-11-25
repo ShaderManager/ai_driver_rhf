@@ -68,7 +68,9 @@ float chi2_patch_distance(const float* channel_histograms[], int nchan,
 	return dist;
 }
 
-void rhf_filter_singlescale(int width, int height, int bins, int knn, const float* input_image, const float* channel_histograms[], float* out_image, const RHFParameters& params)
+void rhf_filter_singlescale(int width, int height, int bins, int knn, 
+	const float* input_image, const float* channel_histograms[], 
+	float* out_image, const RHFParameters& params)
 {
 	const int num_pixels = width * height;
 
@@ -235,14 +237,274 @@ void rhf_filter_singlescale(int width, int height, int bins, int knn, const floa
 	});
 }
 
+void gaussian_downscale(const float* input_image, float* scaled_image, int nchan, 
+	int src_width, int src_height, int dest_width, int dest_height, 
+	float scale, float sigma_scale)
+{
+	const float sigma = scale < 1.0f ? sigma_scale * std::sqrt(1.f / (scale * scale) - 1) : sigma_scale;
+
+	/*
+	The size of the kernel is selected to guarantee that the
+	the first discarded term is at least 10^precision times smaller
+	than the central value. For that, h should be larger than x, with
+	e^(-x^2/2sigma^2) = 1/10^precision.
+	Then, x = sigma * sqrt( 2 * prec * ln(10) ).
+	*/
+	static const float precision = 2.0;
+	const int kernel_radius = std::ceil(sigma * std::sqrt(2.0 * precision * std::log(10.0)));
+	const int kernel_size = 2 * kernel_radius + 1;
+
+	std::vector<float> convolved(dest_width * src_height * nchan, 0);
+
+	std::vector<float> kernel(kernel_size, 0);
+
+	const auto gaussian_kernel = [&kernel, kernel_size]
+	(float sigma, float mean)
+	{
+		float sum = 0;
+
+		for (int i = 0; i < kernel_size; i++)
+		{
+			const float x = ((float)i - mean) / sigma;
+			kernel[i] = std::exp(-0.5f * x * x);
+			sum += kernel[i];
+		}
+
+		if (sum > 0)
+		{
+			sum = 1.f / sum;
+
+			for (int i = 0; i < kernel_size; i++)
+			{
+				kernel[i] *= sum;
+			}
+		}
+	};
+
+	// First pass: X axis
+	for (int px = 0; px < dest_width; px++)
+	{
+		const float origin_x = ((float)px + 0.5f) / scale;
+		const int origin_center_x = std::floor(origin_x);
+		const float mean_x = kernel_radius + origin_x - origin_center_x - 0.5f;
+
+		gaussian_kernel(sigma, mean_x);
+
+		for (int py = 0; py < src_height; py++)
+		{
+			for (int chan = 0; chan < nchan; chan++)
+			{
+				float sum = 0;
+
+				for (int i = 0; i < kernel_size; i++)
+				{
+					int idx = origin_center_x - kernel_radius + i;
+
+					// Wrap x coordinate
+					while (idx < 0) idx += 2 * src_width;
+					while (idx >= 2 * src_width) idx -= 2 * src_width;
+					if (idx >= src_width)
+					{
+						idx = 2 * src_width - 1 - idx;
+					}
+
+					sum += input_image[(py * src_width + idx) * nchan + chan] * kernel[i];
+				}
+
+				convolved[(py * dest_width + px) * nchan + chan] = sum;
+			}
+		}
+	}
+
+	// Second pass: Y axis
+	for (int py = 0; py < dest_height; py++)
+	{
+		const float origin_y = ((float)py + 0.5f) / scale;
+		const int origin_center_y = std::floor(origin_y);
+		const float mean_y = kernel_radius + origin_y - origin_center_y - 0.5f;
+
+		gaussian_kernel(sigma, mean_y);
+
+		for (int px = 0; px < dest_width; px++)
+		{
+			for (int chan = 0; chan < nchan; chan++)
+			{
+				float sum = 0;
+
+				for (int i = 0; i < kernel_size; i++)
+				{
+					int idx = origin_center_y - kernel_radius + i;
+
+					// Wrap y coordinate
+					while (idx < 0) idx += 2 * src_height;
+					while (idx >= 2 * src_height) idx -= 2 * src_height;
+					if (idx >= src_height)
+					{
+						idx = 2 * src_height - 1 - idx;
+					}
+
+					sum += convolved[(idx * dest_width + px) * nchan + chan] * kernel[i];
+				}
+
+				scaled_image[(py * dest_width + px) * nchan + chan] = sum;
+			}
+		}
+	}
+}
+
+void bicubic_interpolation(const float* input_image, float* out_image, int nchan,
+	int src_width, int src_height, int dest_width, int dest_height)
+{
+	const float scale_x = (float)src_width / dest_width; // 1 / scale_x, scale_x = srcw/destw
+	const float scale_y = (float)src_height / dest_height; // 1 / scale_y, scale_y = srch/desth
+
+	std::vector<float> convolved(dest_width * src_height * nchan, 0);
+
+	// Key's function
+	const auto cubic = [](float* coeffs, float t, float a)
+	{
+		const float t2 = t * t;
+		const float at = a * t;
+
+		coeffs[0] = a * t2 * (1.f - t);
+		coeffs[1] = (2 * a + 3 - (a + 2) * t) * t2 - at;
+		coeffs[2] = ((a + 2) * t + a - 3) * t2 + 1;
+		coeffs[3] = a * (t - 2) * t2 + at;
+	};
+
+	const auto compute_idx = [](int tx, int ty, int w, int h)
+	{
+		tx = std::min(tx, 2 * w - tx - 1);
+		tx = std::max(tx, -tx - 1);
+
+		ty = std::min(ty, 2 * h - ty - 1);
+		ty = std::max(ty, -ty - 1);
+
+		return ty * w + tx;
+	};
+
+	// First pass
+	for (int px = 0; px < dest_width; px++)
+	{
+		float origin_x = ((float)px + 0.5f) * scale_x;
+
+		if (origin_x < 0 || origin_x > src_width)
+		{
+			for (int py = 0; py < src_height; py++)
+			{
+				memset(convolved.data() + (py * dest_width + px) * nchan, 0, sizeof(float) * nchan);
+			}
+		}
+		else
+		{
+			origin_x -= 0.5f;
+			const int center_x = std::floor(origin_x);
+			const float frac_x = origin_x - center_x;
+
+			float c[4];
+			cubic(c, frac_x, -0.5f);
+
+			if (center_x - 1 >= 0 && center_x + 2 < src_width)
+			{
+				for (int py = 0; py < src_height; py++)
+				{
+					for (int chan = 0; chan < nchan; chan++)
+					{
+						float sum = 0;
+						for (int i = -1; i <= 2; i++)
+						{
+							sum += c[2 - i] * input_image[(py * src_width + center_x + i) * nchan + chan];
+						}
+
+						convolved[(py * dest_width + center_x) * nchan + chan] = sum;
+					}
+				}
+			}
+			else
+			{
+				for (int py = 0; py < src_height; py++)
+				{
+					for (int chan = 0; chan < nchan; chan++)
+					{
+						float sum = 0;
+						for (int i = -1; i <= 2; i++)
+						{
+							const int idx = compute_idx(center_x + i, py, src_width, src_height);
+
+							sum += c[2 - i] * input_image[idx * nchan + chan];
+						}
+
+						convolved[(py * dest_width + center_x) * nchan + chan] = sum;
+					}
+				}
+			}
+		}
+	}
+
+	// Second pass
+	for (int py = 0; py < dest_height; py++)
+	{
+		float origin_y = ((float)py + 0.5f) * scale_y;
+
+		if (origin_y < 0 || origin_y > src_height)
+		{
+			memset(out_image + py * dest_width * nchan, 0, dest_width * sizeof(float) * nchan);			
+		}
+		else
+		{
+			origin_y -= 0.5f;
+			const int center_y = std::floor(origin_y);
+			const float frac_y = origin_y - center_y;
+
+			float c[4];
+			cubic(c, frac_y, -0.5f);
+
+			if (center_y - 1 >= 0 && center_y + 2 < src_height)
+			{
+				for (int px = 0; px < src_width; px++)
+				{
+					for (int chan = 0; chan < nchan; chan++)
+					{
+						float sum = 0;
+						for (int i = -1; i <= 2; i++)
+						{
+							sum += c[2 - i] * convolved[((center_y + i) * dest_width + px) * nchan + chan];
+						}
+
+						out_image[(center_y * dest_width + px) * nchan + chan] = sum;
+					}
+				}
+			}
+			else
+			{
+				for (int px = 0; px < src_width; px++)
+				{
+					for (int chan = 0; chan < nchan; chan++)
+					{
+						float sum = 0;
+						for (int i = -1; i <= 2; i++)
+						{
+							const int idx = compute_idx(px, center_y + i, dest_width, src_height);
+
+							sum += c[2 - i] * convolved[idx * nchan + chan];
+						}
+
+						out_image[(center_y * dest_width + px) * nchan + chan] = sum;
+					}
+				}
+			}
+		}
+	}
+}
+
 void rhf_filter(int width, int height, int bins, const float* input_image, const float* channel_histograms[], float* out_image, const RHFParameters& params)
 {
 	const int num_pixels = width * height;
 
 	memset(out_image, 0, num_pixels * 4 * sizeof(float));
 
-	rhf_filter_singlescale(width, height, bins, params.knn, input_image, channel_histograms, out_image, params);
-	return;
+	/*rhf_filter_singlescale(width, height, bins, params.knn, input_image, channel_histograms, out_image, params);
+	return;*/
 
 	double total = 0;
 
@@ -251,54 +513,42 @@ void rhf_filter(int width, int height, int bins, const float* input_image, const
 		total += channel_histograms[0][i];
 	}
 
-	OIIO::ImageBuf input_buf(OIIO::ImageSpec(width, height, 4, OIIO::TypeDesc::FLOAT), (void*)input_image);
-	OIIO::ImageBuf hist_nsamples(OIIO::ImageSpec(width, height, bins, OIIO::TypeDesc::FLOAT), (void*)channel_histograms[0]);
-	OIIO::ImageBuf hist_red(OIIO::ImageSpec(width, height, bins, OIIO::TypeDesc::FLOAT), (void*)channel_histograms[1]);
-	OIIO::ImageBuf hist_green(OIIO::ImageSpec(width, height, bins, OIIO::TypeDesc::FLOAT), (void*)channel_histograms[2]);
-	OIIO::ImageBuf hist_blue(OIIO::ImageSpec(width, height, bins, OIIO::TypeDesc::FLOAT), (void*)channel_histograms[3]);
+	float* first_scaled_image = new float[width * height * 4];
+	float* second_scaled_image = new float[width * height * 4];
 
-	OIIO::ImageBuf old_input_buf;
+	float* old_image = first_scaled_image;
+	float* next_scaled_image = second_scaled_image;
 
-	/*memcpy(input_buf.localpixels(), 0, width * height * 4 * sizeof(float));
-	memcpy(hist_red.localpixels(), 0, width * height * bins * sizeof(float));
-	memcpy(hist_green.localpixels(), 0, width * height * bins * sizeof(float));
-	memcpy(hist_blue.localpixels(), 0, width * height * bins * sizeof(float));*/
+	std::vector<float> scaled_hist_nsamples(width * height, 0);
+	std::vector<float> scaled_hist_red(width * height * bins, 0);
+	std::vector<float> scaled_hist_green(width * height * bins, 0);
+	std::vector<float> scaled_hist_blue(width * height * bins, 0);
+
+	static const float sigma_scale = 0.55f;
 
 	for (int s = params.nscales - 1; s >= 0; s--)
 	{					
 		int sw = width;
 		int sh = height;		
 
-		OIIO::ImageBuf scaled_input;
-		OIIO::ImageBuf scaled_hist_nsamples;
-		OIIO::ImageBuf scaled_hist_red;
-		OIIO::ImageBuf scaled_hist_green;
-		OIIO::ImageBuf scaled_hist_blue;
-
 		if (s > 0)
 		{
 			const double scale = std::pow(0.5f, s);
 
-			sw *= scale;
-			sh *= scale;
+			sw = std::floor(sw * scale);
+			sh = std::floor(sh * scale);
 
-			scaled_input.reset(OIIO::ImageSpec(sw, sh, 4, OIIO::TypeDesc::FLOAT));
-			scaled_hist_nsamples.reset(OIIO::ImageSpec(sw, sh, 1, OIIO::TypeDesc::FLOAT));
-			scaled_hist_red.reset(OIIO::ImageSpec(sw, sh, bins, OIIO::TypeDesc::FLOAT));
-			scaled_hist_green.reset(OIIO::ImageSpec(sw, sh, bins, OIIO::TypeDesc::FLOAT));
-			scaled_hist_blue.reset(OIIO::ImageSpec(sw, sh, bins, OIIO::TypeDesc::FLOAT));
-
-			OIIO::ImageBufAlgo::resize(scaled_input, input_buf, "gaussian", 2.f);
-			OIIO::ImageBufAlgo::resize(scaled_hist_nsamples, hist_nsamples, "gaussian", 2.f);
-			OIIO::ImageBufAlgo::resize(scaled_hist_red, hist_red, "gaussian", 2.f);
-			OIIO::ImageBufAlgo::resize(scaled_hist_green, hist_green, "gaussian", 2.f);
-			OIIO::ImageBufAlgo::resize(scaled_hist_blue, hist_blue, "gaussian", 2.f);
+			gaussian_downscale(input_image, next_scaled_image, 4, width, height, sw, sh, scale, sigma_scale);
+			gaussian_downscale(channel_histograms[0], scaled_hist_nsamples.data(), 1, width, height, sw, sh, scale, sigma_scale);
+			gaussian_downscale(channel_histograms[1], scaled_hist_red.data(), bins, width, height, sw, sh, scale, sigma_scale);
+			gaussian_downscale(channel_histograms[2], scaled_hist_green.data(), bins, width, height, sw, sh, scale, sigma_scale);
+			gaussian_downscale(channel_histograms[3], scaled_hist_blue.data(), bins, width, height, sw, sh, scale, sigma_scale);
 
 			double total_scaled = 0;
 
 			for (int i = 0; i < sw * sh; i++)
 			{
-				total_scaled += ((float*)scaled_hist_nsamples.localpixels())[i];
+				total_scaled += scaled_hist_nsamples[i];
 			}
 
 			const float norm = total / total_scaled;
@@ -307,19 +557,15 @@ void rhf_filter(int width, int height, int bins, const float* input_image, const
 			{
 				for (int j = 0; j < bins; j++)
 				{
-					((float*)scaled_hist_red.localpixels())[i * bins + j] *= norm;
-					((float*)scaled_hist_green.localpixels())[i * bins + j] *= norm;
-					((float*)scaled_hist_blue.localpixels())[i * bins + j] *= norm;
+					scaled_hist_red[i * bins + j] *= norm;
+					scaled_hist_green[i * bins + j] *= norm;
+					scaled_hist_blue[i * bins + j] *= norm;
 				}
 			}
 		}
 		else
 		{
-			scaled_input.swap(input_buf);
-			scaled_hist_nsamples.swap(hist_nsamples);
-			scaled_hist_red.swap(hist_red);
-			scaled_hist_green.swap(hist_green);
-			scaled_hist_blue.swap(hist_blue);
+
 		}
 
 		OIIO::ImageBuf out_buf(OIIO::ImageSpec(sw, sh, 4, OIIO::TypeDesc::FLOAT));
@@ -328,13 +574,13 @@ void rhf_filter(int width, int height, int bins, const float* input_image, const
 
 		const float* scaled_hists[] = 
 		{
-			(float*)scaled_hist_nsamples.localpixels(),
-			(float*)scaled_hist_red.localpixels(),
-			(float*)scaled_hist_green.localpixels(),
-			(float*)scaled_hist_blue.localpixels()
+			scaled_hist_nsamples.data(),
+			scaled_hist_red.data(),
+			scaled_hist_green.data(),
+			scaled_hist_blue.data()
 		};
 
-		rhf_filter_singlescale(sw, sh, bins, knn_scaled, (float*)scaled_input.localpixels(), scaled_hists, (float*)out_buf.localpixels(), params);
+		rhf_filter_singlescale(sw, sh, bins, knn_scaled, next_scaled_image, scaled_hists, (float*)out_buf.localpixels(), params);
 
 		if (s < params.nscales - 1)
 		{
@@ -346,6 +592,6 @@ void rhf_filter(int width, int height, int bins, const float* input_image, const
 			memcpy(out_image, out_buf.localpixels(), width * height * 4 * sizeof(float));
 		}
 
-		old_input_buf.swap(scaled_input);
+		std::swap(old_image, next_scaled_image);
 	}		
 }
