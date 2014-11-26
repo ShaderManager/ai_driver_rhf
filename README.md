@@ -2,7 +2,6 @@ Arnold RHF driver
 ===========================================================
 
 Raw output driver for Solid Angle's Arnold with filter based on publication "Boosting Monte Carlo Rendering by Ray Histogram Fusion" http://dev.ipol.im/~mdelbra/rhf/ 
-===========================================================
 
 Library dependencies: C++11-compatible compiler, Arnold SDK (version >= 4.1), OpenImageIO (version >= 1.5) and TBB
 
