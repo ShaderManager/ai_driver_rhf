@@ -6,6 +6,12 @@ Raw output driver for Solid Angle's Arnold with filter based on publication "Boo
 Library dependencies: C++11-compatible compiler, Arnold SDK (version >= 4.1), OpenImageIO (version >= 1.5) and TBB
 
 ===========================================================
+Current limitations:
+1. Only RGBA Beauty is supported at this moment (i.e. 4 float channels).
+2. Image is stored in memory wholly. It means driver can allocate significant amount of memory.
+3. Plugin saves picture in 32 bit float format. Subject to change in future.
+
+===========================================================
 Node parameters:
 + STRING filename (default = output.tif) - Output filename. Image writing is handled by OpenImageIO
 + STRING filter (default = gaussian) - Pixel samples filter (before RHF filter). Plugin uses filters from OpenImageIO library
