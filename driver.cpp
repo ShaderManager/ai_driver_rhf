@@ -52,8 +52,6 @@ node_initialize
 {
 	RHFDriver* self = (RHFDriver*)AiMalloc(sizeof(RHFDriver));
 
-	//AiDriverInitialize(node, false, self);	
-
 	static const char* required_aovs[] = { "RGBA RGBA", NULL };
 
 	AiRawDriverInitialize(node, required_aovs, false, self);
@@ -247,8 +245,6 @@ driver_close
 	delete image_out;
 }
 
-#include <Windows.h>
-
 node_loader
 {
 	sprintf(node->version, AI_VERSION);
@@ -257,8 +253,6 @@ node_loader
 	{
 	case 0:
 		{
-			//MessageBox(0, L"!", L"!", MB_OK);
-
 			node->methods = rhf_driver_mtds;
 			node->output_type = AI_TYPE_RGBA;
 			node->name = "driver_rhf";
