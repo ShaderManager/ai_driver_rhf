@@ -7,8 +7,11 @@ Library dependencies: C++11-compatible compiler, Arnold SDK (version >= 4.1), Op
 
 ===========================================================
 Current limitations:
+
 1. Only RGBA Beauty is supported at this moment (i.e. 4 float channels).
+
 2. Image is stored in memory wholly. It means driver can allocate significant amount of memory.
+
 3. Plugin saves picture in 32 bit float format. Subject to change in future.
 
 ===========================================================
