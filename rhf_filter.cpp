@@ -120,7 +120,7 @@ void rhf_filter_singlescale(int width, int height, int bins, int knn,
 					}
 				}
 
-				std::sort(nearest_neighours.begin(), nearest_neighours.end(), [](std::tuple<float, int, int>& lhs, std::tuple<float, int, int>& rhs)
+				std::sort(nearest_neighours.begin(), nearest_neighours.end(), [](const std::tuple<float, int, int>& lhs, const std::tuple<float, int, int>& rhs)
 				{
 					return std::get<0>(lhs) < std::get<0>(rhs);
 				});
